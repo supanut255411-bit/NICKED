@@ -1,6 +1,6 @@
 package dev.nicks.compat;
 
-import net.minecraft.entity.player.PlayerModelType;
+import net.minecraft.entity.player.PlayerSkinType;
 import net.minecraft.entity.player.SkinTextures;
 import net.minecraft.util.AssetInfo;
 import net.minecraft.util.Identifier;
@@ -20,6 +20,6 @@ public final class SkinCompat {
 
     public static SkinTextures build(Identifier texture, boolean slim, SkinTextures original) {
         return new SkinTextures(new AssetInfo.TextureAssetInfo(texture, texture), null, null,
-                slim ? PlayerModelType.SLIM : PlayerModelType.WIDE, true);
+slim ? PlayerSkinType.SLIM : PlayerSkinType.WIDE, true);
     }
 }
