@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "nicks",
+  "version": "${version}",
+  "name": "Nicks",
+  "description": "Admin identity replacement: a nickname plus a matching skin (official skin for real accounts, unique fictional skin otherwise), shown live in the tab list, nametags, chat, death messages and commands. The real UUID, account and player data never change.",
+  "authors": ["Nicks"],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.nicks.NicksMod"],
+    "client": ["dev.nicks.client.NicksClient"]
+  },
+  "mixins": [
+    "nicks.mixins.json",
+    { "config": "nicks.client.mixins.json", "environment": "client" }
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
