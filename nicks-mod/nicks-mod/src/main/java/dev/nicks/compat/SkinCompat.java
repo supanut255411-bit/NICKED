@@ -1,8 +1,8 @@
 package dev.nicks.compat;
 
 import net.minecraft.client.util.DefaultSkinHelper;
-import net.minecraft.entity.player.PlayerModelType;
 import net.minecraft.entity.player.PlayerSkinType;
+import net.minecraft.entity.player.SkinTextures;
 import net.minecraft.util.AssetInfo;
 import net.minecraft.util.Identifier;
 
@@ -13,10 +13,10 @@ import java.util.UUID;
  * <pre>
  *  1.21.2-1.21.4: new SkinTextures(Identifier tex, String url, Identifier cape, Identifier elytra, SkinTextures.Model m, boolean secure)
  *  1.21.5-1.21.8: new SkinTextures(AssetInfo.TextureAsset tex, TextureAsset cape, TextureAsset elytra, SkinTextures.Model m, boolean secure)
- *  1.21.9+     : same shape, model enum is now PlayerModelType (WIDE/SLIM)   &lt;-- written below
+ *  1.21.9+     : same shape, model enum is now PlayerSkinType (WIDE/SLIM)   &lt;-- written below
  * </pre>
  * Also verify {@code DefaultSkinHelper.getSkinTextures(UUID)} (the built-in default skin the game picks for a UUID) and the
- * record accessor {@code texture()} used in the rare "default skin + cape" case.
+ * record accessors {@code body()} / {@code model()} used in the rare "default skin + cape" case.
  *
  * The textures are registered dynamically, so the registered Identifier doubles as the texture path. The cape (null =
  * the source has none, so NO cape is shown) also serves as elytra texture, exactly as vanilla does for profile capes.
@@ -39,6 +39,6 @@ public final class SkinCompat {
         AssetInfo.TextureAsset body = new AssetInfo.TextureAssetInfo(skin, skin);
         AssetInfo.TextureAsset capeAsset = cape == null ? null : new AssetInfo.TextureAssetInfo(cape, cape);
         return new SkinTextures(body, capeAsset, capeAsset,
-        slim ? PlayerSkinType.SLIM : PlayerSkinType.WIDE, true);
+                slim ? PlayerSkinType.SLIM : PlayerSkinType.WIDE, true);
     }
 }
