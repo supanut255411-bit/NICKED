@@ -17,7 +17,7 @@ public final class NicksClient implements ClientModInitializer {
         NicksRuntime.setClientView(REGISTRY);
         // Textures always arrive before the identity that references them (same connection, in order).
         ClientPlayNetworking.registerGlobalReceiver(SkinTexturePayload.ID,
-                (payload, ctx) -> ctx.client().execute(() -> REGISTRY.onTexture(payload.hash(), payload.png())));
+                (payload, ctx) -> ctx.client().execute(() -> REGISTRY.onTexture(payload.kind(), payload.hash(), payload.png())));
         ClientPlayNetworking.registerGlobalReceiver(IdentitySyncPayload.ID,
                 (payload, ctx) -> ctx.client().execute(() -> REGISTRY.onIdentity(payload)));
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> client.execute(REGISTRY::clear));

@@ -32,7 +32,8 @@ public final class NicksConfig {
         public boolean enableRandom = true;
         public int randomMinLength = 3;
         public int randomMaxLength = 16;
-        public boolean allowDuplicateNicknames = false;
+        /** Several players may share one nickname (needed for /nicks set @a Steve). Set false to refuse duplicates. */
+        public boolean allowDuplicateNicknames = true;
         public boolean preserveHistory = true;
         public int historyLimit = 50;
         /** Keep resolving the real username to the player in commands. */
@@ -44,20 +45,34 @@ public final class NicksConfig {
         /** Optional vanilla colour name for nicknames ("gold", "aqua", ...). Empty = keep team colour only. */
         public String color = "";
         public int recentRandomMemory = 200;
+        /** File inside config/nicks/nickname-pools/ used by /nicks random (default copy is bundled in the jar). */
+        public String poolFile = "nicks_1_million_usernames.txt";
         public List<String> bannedFragments = new ArrayList<>(List.of(
                 "fuck", "shit", "bitch", "cunt", "nigg", "fagg", "rape", "nazi", "hitler", "porn", "kkk"));
     }
 
     public static final class Skin {
         public boolean enableOfficialResolution = true;
-        public boolean enableFictionalSkins = true;
-        public boolean enableProceduralGeneration = true;
+        /**
+         * Where skins for nicknames that are NOT real accounts come from, in priority order. Only real, existing skins
+         * are ever used: "mojang-accounts" (real accounts found through the official Mojang API), "skindb" (public
+         * skin database returning Mojang-hosted textures) and "assets" (PNG files you put in assetDirectory).
+         */
+        public List<String> sources = new ArrayList<>(List.of("mojang-accounts", "skindb", "assets"));
+        public String skinDbUrl = "https://api.skindb.net/skin/random?count=10";
+        /** A borrowed real account's cape comes along with its skin (always from the same account). */
+        public boolean donorCapes = true;
+        public boolean allowDuplicateBorrowedSkins = false;
+        public boolean backgroundDonorHarvest = true;
+        public int donorTarget = 300;
+        public int donorHarvestIntervalSeconds = 45;
+        public int maxDonorProbeRequests = 40;
+        public int donorProbeSeconds = 25;
+        public int maxDonors = 5000;
         public boolean enableSkinLocking = true;
-        public boolean allowDuplicateFictionalSkins = false;
-        public boolean preferAssetLibrary = true;
         public int maxCacheEntries = 256;
         public int downloadTimeoutSeconds = 10;
-        /** Relative to config/nicks/. Put extra fictional skins here as name.png / name.slim.png. */
+        /** Relative to config/nicks/. Your own skin PNGs: name.png (classic) / name.slim.png (slim). */
         public String assetDirectory = "skin_assets";
         public int maxSkinBytes = 262144;
         public List<String> allowedTextureHosts = new ArrayList<>(List.of("textures.minecraft.net"));
@@ -86,6 +101,7 @@ public final class NicksConfig {
         public int maxRateLimitWaitSeconds = 30;
         public String nameLookupUrl = "https://api.minecraftservices.com/minecraft/profile/lookup/name/";
         public String sessionProfileUrl = "https://sessionserver.mojang.com/session/minecraft/profile/";
+        public String bulkLookupUrl = "https://api.minecraftservices.com/minecraft/profile/lookup/bulk/byname";
     }
 
     public static final class Storage {
@@ -132,6 +148,11 @@ public final class NicksConfig {
         nickname.randomMaxLength = Math.max(nickname.randomMinLength, Math.min(16, nickname.randomMaxLength));
         nickname.historyLimit = Math.max(0, nickname.historyLimit);
         skin.maxCacheEntries = Math.max(8, skin.maxCacheEntries);
+        skin.maxDonors = Math.max(10, skin.maxDonors);
+        skin.donorTarget = Math.max(0, Math.min(skin.maxDonors, skin.donorTarget));
+        skin.donorHarvestIntervalSeconds = Math.max(5, skin.donorHarvestIntervalSeconds);
+        skin.maxDonorProbeRequests = Math.max(1, skin.maxDonorProbeRequests);
+        skin.donorProbeSeconds = Math.max(1, skin.donorProbeSeconds);
         skin.downloadTimeoutSeconds = Math.max(1, skin.downloadTimeoutSeconds);
         skin.maxSkinBytes = Math.max(1024, Math.min(1_048_576, skin.maxSkinBytes));
         network.maxTexturePayloadBytes = Math.max(4096, Math.min(900_000, network.maxTexturePayloadBytes));

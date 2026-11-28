@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -92,6 +93,57 @@ public final class OfficialProfileResolver implements AutoCloseable {
         return mine;
     }
 
+    /** An account found by the bulk name lookup. */
+    public record Found(UUID id, String name) {}
+
+    /** Result of {@link #bulkExisting}: only existing accounts are returned; {@code error} != null means the service failed. */
+    public record BulkResult(List<Found> found, String error) {
+        public boolean ok() { return error == null; }
+    }
+
+    /**
+     * Ask Mojang which of up to 10 names are real accounts (one request). Blocking: call from a worker thread.
+     * Names that do not exist are simply absent from the answer; a failure is reported in {@code error}.
+     */
+    public BulkResult bulkExisting(List<String> names) {
+        List<String> valid = names.stream().filter(Nicknames::isValidAccountName).limit(10).toList();
+        if (valid.isEmpty()) return new BulkResult(List.of(), null);
+        Step<List<Found>> s = withRetry(() -> bulkOnce(valid));
+        return s.value() == null ? new BulkResult(List.of(), s.error()) : new BulkResult(s.value(), null);
+    }
+
+    /** Fetch the signed textures profile of a known account (skin, model, cape). Blocking: worker thread only. */
+    public ProfileLookupResult profile(UUID id, String name) {
+        Step<ProfileLookupResult.Real> p = withRetry(() -> fetchProfile(new NameProfile(id, name)));
+        return p.value() == null ? new ProfileLookupResult.Unresolved(p.error()) : p.value();
+    }
+
+    private Step<List<Found>> bulkOnce(List<String> names) {
+        HttpTransport.Response r;
+        try {
+            if (!limiter.acquire(cfg.network.maxRateLimitWaitSeconds * 1000L)) return Step.fail("local request limit reached");
+            r = http.post(URI.create(cfg.network.bulkLookupUrl), Json.write(names).getBytes(StandardCharsets.UTF_8),
+                    "application/json", Duration.ofSeconds(cfg.skin.downloadTimeoutSeconds), 65536);
+        } catch (IOException e) {
+            return Step.retry("network error: " + e.getMessage(), 0);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Step.fail("interrupted");
+        }
+        if (r.status() != 200) return statusProblem(r.status(), r);
+        try {
+            List<Found> out = new java.util.ArrayList<>();
+            if (!(Json.parse(utf8(r.body())) instanceof List<?> list)) return Step.fail("malformed bulk response");
+            for (Object o : list) {
+                if (!(o instanceof Map<?, ?> m) || !(m.get("id") instanceof String id) || !(m.get("name") instanceof String n)) continue;
+                out.add(new Found(parseUndashed(id), n));
+            }
+            return Step.ok(out);
+        } catch (RuntimeException e) {
+            return Step.fail("malformed bulk response");
+        }
+    }
+
     private ProfileLookupResult resolve(String name, String key) {
         Step<Optional<NameProfile>> s = withRetry(() -> lookupName(name));
         if (s.value() == null) return new ProfileLookupResult.Unresolved(s.error());
@@ -153,7 +205,7 @@ public final class OfficialProfileResolver implements AutoCloseable {
         HttpTransport.Response r;
         try {
             if (!limiter.acquire(cfg.network.maxRateLimitWaitSeconds * 1000L)) return Step.fail("local request limit reached");
-            r = http.get(URI.create(cfg.network.sessionProfileUrl + np.id().toString().replace("-", "") + "?unsigned=true"),
+            r = http.get(URI.create(cfg.network.sessionProfileUrl + np.id().toString().replace("-", "") + "?unsigned=false"),
                     Duration.ofSeconds(cfg.skin.downloadTimeoutSeconds), 65536);
         } catch (IOException e) {
             return Step.retry("network error: " + e.getMessage(), 0);
@@ -204,19 +256,21 @@ public final class OfficialProfileResolver implements AutoCloseable {
 
     static ProfileLookupResult.Real parseProfile(NameProfile np, byte[] body) {
         Map<String, Object> m = Json.parseObject(utf8(body));
-        String skinUrl = null;
+        String skinUrl = null, capeUrl = null, signature = "";
         SkinModel model = SkinModel.CLASSIC;
         for (Object o : Json.list(m, "properties")) {
             if (!(o instanceof Map<?, ?> pm) || !"textures".equals(pm.get("name")) || !(pm.get("value") instanceof String v)) continue;
-            Map<String, Object> tex = Json.parseObject(new String(Base64.getDecoder().decode(v), StandardCharsets.UTF_8));
-            Map<String, Object> skin = Json.obj(Json.obj(tex, "textures"), "SKIN");
+            if (pm.get("signature") instanceof String sig) signature = sig;
+            Map<String, Object> textures = Json.obj(Json.parseObject(new String(Base64.getDecoder().decode(v), StandardCharsets.UTF_8)), "textures");
+            Map<String, Object> skin = Json.obj(textures, "SKIN");
             if (skin != null) {
                 skinUrl = Json.str(skin, "url", null);
                 model = SkinModel.parse(Json.str(Json.obj(skin, "metadata"), "model", "default"));
             }
+            Map<String, Object> cape = Json.obj(textures, "CAPE"); // present only if the account really has a cape
+            if (cape != null) capeUrl = Json.str(cape, "url", null);
         }
-        String canonical = Json.str(m, "name", np.name());
-        return new ProfileLookupResult.Real(np.id(), canonical, skinUrl, model);
+        return new ProfileLookupResult.Real(np.id(), Json.str(m, "name", np.name()), skinUrl, model, capeUrl, signature);
     }
 
     static UUID parseUndashed(String s) {

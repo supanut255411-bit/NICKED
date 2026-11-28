@@ -80,9 +80,11 @@ public final class IdentityPersistence implements AutoCloseable {
         return new PlayerIdentity(uuid, Json.str(m, "originalUsername", ""), nick.isEmpty() ? null : nick,
                 Json.bool(m, "active", false), IdentityType.parse(Json.str(m, "identityType", "")),
                 Json.str(m, "skinSource", "original"), SkinModel.parse(Json.str(m, "skinModel", "")),
-                Json.str(m, "skinHash", ""), Json.str(m, "fictionalSkinId", ""),
-                officialStr.isEmpty() ? null : UUID.fromString(officialStr), Json.bool(m, "skinLocked", false),
-                Json.num(m, "revision", 0), Json.num(m, "createdAt", now), Json.num(m, "lastUpdated", now), history);
+                Json.str(m, "skinHash", ""), Json.bool(m, "defaultSkin", false), Json.str(m, "capeHash", ""),
+                Json.bool(m, "capeAvailable", false), officialStr.isEmpty() ? null : UUID.fromString(officialStr),
+                Json.str(m, "sourceName", ""), Json.str(m, "textureSignature", ""), Json.num(m, "appearanceUpdated", 0),
+                Json.bool(m, "skinLocked", false), Json.num(m, "revision", 0), Json.num(m, "createdAt", now),
+                Json.num(m, "lastUpdated", now), history);
     }
 
     static Map<String, Object> toMap(PlayerIdentity p) {
@@ -95,8 +97,13 @@ public final class IdentityPersistence implements AutoCloseable {
         m.put("skinSource", p.skinSource());
         m.put("skinModel", p.skinModel().name());
         m.put("skinHash", p.skinHash());
-        m.put("fictionalSkinId", p.fictionalSkinId());
+        m.put("defaultSkin", p.defaultSkin());
+        m.put("capeHash", p.capeHash());
+        m.put("capeAvailable", p.capeAvailable());
         m.put("officialProfileUuid", p.officialProfileUuid() == null ? "" : p.officialProfileUuid().toString());
+        m.put("sourceName", p.sourceName());
+        m.put("textureSignature", p.textureSignature());
+        m.put("appearanceUpdated", p.appearanceUpdated());
         m.put("skinLocked", p.skinLocked());
         m.put("revision", p.revision());
         m.put("createdAt", p.createdAt());

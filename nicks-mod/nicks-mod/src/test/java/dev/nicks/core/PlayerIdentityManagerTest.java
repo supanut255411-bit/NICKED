@@ -49,8 +49,10 @@ class PlayerIdentityManagerTest {
         m.close();
     }
 
-    @Test void duplicateNicknamesAndForeignAccountNamesAreRejected() {
-        PlayerIdentityManager m = manager(fastConfig(), tempDir());
+    @Test void duplicateNicknamesAndForeignAccountNamesAreRejectedWhenDuplicatesAreSwitchedOff() {
+        NicksConfig cfg = fastConfig();
+        cfg.nickname.allowDuplicateNicknames = false;
+        PlayerIdentityManager m = manager(cfg, tempDir());
         UUID a = UUID.randomUUID(), b = UUID.randomUUID();
         m.getOrCreate(a, "Alice");
         m.getOrCreate(b, "Bob");
@@ -149,7 +151,9 @@ class PlayerIdentityManagerTest {
     }
 
     @Test void usernameChangeOfRealAccountIsTracked() {
-        PlayerIdentityManager m = manager(fastConfig(), tempDir());
+        NicksConfig cfg = fastConfig();
+        cfg.nickname.allowDuplicateNicknames = false;
+        PlayerIdentityManager m = manager(cfg, tempDir());
         UUID u = UUID.randomUUID();
         m.getOrCreate(u, "OldName");
         m.getOrCreate(u, "NewName");
@@ -157,5 +161,47 @@ class PlayerIdentityManagerTest {
         assertNull(m.nicknameConflict(UUID.randomUUID(), "OldName"));
         assertNotNull(m.nicknameConflict(UUID.randomUUID(), "NewName"));
         m.close();
+    }
+
+    @Test void byDefaultManyPlayersCanShareOneNickname() {
+        PlayerIdentityManager m = manager(fastConfig(), tempDir());
+        java.util.List<UUID> players = new java.util.ArrayList<>();
+        for (int i = 0; i < 6; i++) { UUID u = UUID.randomUUID(); players.add(u); m.getOrCreate(u, "Player" + i); }
+        for (UUID u : players) nick(m, u, "Steve"); // /nicks set @a Steve
+        for (UUID u : players) assertEquals("Steve", m.get(u).orElseThrow().nickname());
+        assertTrue(m.resolveNickname("steve").orElseThrow().ambiguous(), "commands never guess between players sharing a nickname");
+        // even a nickname equal to somebody else's real account name is accepted by default
+        UUID other = UUID.randomUUID();
+        m.getOrCreate(other, "Notch");
+        nick(m, players.get(0), "Notch");
+        m.close();
+    }
+
+    @Test void appearanceWithCapeSurvivesARestartAndIsClearedByReset() throws Exception {
+        Path dir = tempDir();
+        PlayerIdentityManager m = manager(fastConfig(), dir);
+        UUID u = UUID.randomUUID(), src = UUID.randomUUID();
+        m.getOrCreate(u, "Player123");
+        SkinData skin = new SkinData("a".repeat(64), SkinModel.SLIM, new byte[] {1});
+        SkinData cape = new SkinData("b".repeat(64), SkinModel.CLASSIC, new byte[] {2});
+        Appearance a = new Appearance(src, "Notch", "official", skin, SkinModel.SLIM, cape, true, "SIG", 12345L);
+        m.apply(u, -1, "Notch", b -> { b.nickname = "Notch"; b.active = true; b.setAppearance(IdentityType.REAL_ACCOUNT, "official:Notch", a); });
+        m.close();
+        PlayerIdentityManager again = manager(fastConfig(), dir);
+        PlayerIdentity id = again.get(u).orElseThrow();
+        assertEquals("b".repeat(64), id.capeHash());
+        assertTrue(id.capeAvailable());
+        assertEquals(src, id.officialProfileUuid());
+        assertEquals("Notch", id.sourceName());
+        assertEquals("SIG", id.textureSignature());
+        assertEquals(12345L, id.appearanceUpdated());
+        assertEquals(SkinModel.SLIM, id.skinModel());
+        assertTrue(id.hasAppearance());
+        again.apply(u, -1, null, PlayerIdentity.Builder::clearDisplayed);
+        PlayerIdentity reset = again.get(u).orElseThrow();
+        assertEquals("", reset.capeHash());
+        assertFalse(reset.capeAvailable());
+        assertFalse(reset.hasAppearance(), "original skin and cape show again");
+        again.close();
     }
 }

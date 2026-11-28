@@ -43,6 +43,38 @@ public final class SkinImages {
         }
     }
 
+    /** Decode a cape PNG: official 64x32 (or HD multiples of it) and the old 22x17 / 46x22 formats. Pixels are never altered. */
+    public static BufferedImage decodeCape(byte[] data, int maxBytes) throws SkinException {
+        if (data == null || data.length == 0) throw new SkinException("Empty cape texture");
+        if (data.length > maxBytes) throw new SkinException("Cape texture too large (" + data.length + " bytes)");
+        if (data.length < 8 || (data[0] & 0xFF) != 0x89 || data[1] != 'P' || data[2] != 'N' || data[3] != 'G') {
+            throw new SkinException("Cape texture is not a PNG");
+        }
+        try (ImageInputStream in = ImageIO.createImageInputStream(new ByteArrayInputStream(data))) {
+            Iterator<ImageReader> it = ImageIO.getImageReadersByFormatName("png");
+            if (!it.hasNext()) throw new SkinException("No PNG reader available on this JVM (java.desktop missing?)");
+            ImageReader reader = it.next();
+            try {
+                reader.setInput(in, true, true);
+                int w = reader.getWidth(0), h = reader.getHeight(0);
+                boolean hd = w >= 64 && w <= 1024 && Integer.bitCount(w) == 1 && h * 2 == w;
+                if (!hd && !(w == 22 && h == 17) && !(w == 46 && h == 22)) throw new SkinException("Unsupported cape size " + w + "x" + h);
+                BufferedImage src = reader.read(0);
+                BufferedImage argb = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) argb.setRGB(x, y, src.getRGB(x, y));
+                return argb;
+            } finally {
+                reader.dispose();
+            }
+        } catch (IOException | RuntimeException e) {
+            throw new SkinException("Malformed cape PNG: " + e.getMessage());
+        }
+    }
+
+    public static SkinData fromCapePng(byte[] png, int maxBytes) throws SkinException {
+        return toSkinData(decodeCape(png, maxBytes), SkinModel.CLASSIC);
+    }
+
     /** Returns a 64x64 ARGB image following the vanilla skin-processing rules. */
     public static BufferedImage normalize(BufferedImage src) {
         boolean legacy = src.getHeight() == 32;

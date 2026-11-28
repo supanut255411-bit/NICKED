@@ -107,4 +107,50 @@ class OfficialProfileResolverTest {
         assertTrue(r instanceof ProfileLookupResult.Real, "expected Real but got " + r);
         return (ProfileLookupResult.Real) r;
     }
+
+    @Test void profileWithCapeCarriesTheCapeUrlAndSignedTexturesSignature() throws Exception {
+        NicksConfig cfg = fastConfig();
+        FakeMojang mojang = new FakeMojang(cfg);
+        mojang.add("Capey", false, 0x123456);
+        mojang.add("Bare", false, -1);
+        OfficialProfileResolver r = new OfficialProfileResolver(mojang, cfg);
+        ProfileLookupResult.Real capey = assertInstanceOf(r.lookup("capey", false).get(10, TimeUnit.SECONDS));
+        assertNotNull(capey.capeUrl());
+        assertEquals("SIGNATURE", capey.signature());
+        assertEquals("Capey", capey.canonicalName());
+        ProfileLookupResult.Real bare = assertInstanceOf(r.lookup("Bare", false).get(10, TimeUnit.SECONDS));
+        assertNull(bare.capeUrl(), "no CAPE entry in the profile = no cape");
+    }
+
+    @Test void theSessionProfileIsRequestedSignedAndAServiceFailureIsNotNoCape() throws Exception {
+        List<String> urls = new ArrayList<>();
+        FakeHttp http = new FakeHttp(u -> {
+            urls.add(u.toString());
+            return mojang(n -> NOTCH, n -> URL, n -> null).handle(u);
+        });
+        assertInstanceOf(run(resolver(http), "Notch"));
+        assertTrue(urls.stream().anyMatch(x -> x.endsWith("?unsigned=false")), urls.toString());
+        FakeHttp sessionDown = new FakeHttp(u -> u.toString().contains("sessionserver") ? resp(503, "down")
+                : mojang(n -> NOTCH, n -> URL, n -> null).handle(u));
+        assertTrue(run(resolver(sessionDown), "Notch") instanceof ProfileLookupResult.Unresolved);
+    }
+
+    @Test void bulkLookupReturnsOnlyExistingAccountsAndReportsFailures() {
+        NicksConfig cfg = fastConfig();
+        FakeMojang mojang = new FakeMojang(cfg);
+        mojang.add("RealOne", false, -1);
+        mojang.add("RealTwo", true, -1);
+        OfficialProfileResolver r = new OfficialProfileResolver(mojang, cfg);
+        List<String> names = new ArrayList<>(List.of("RealOne", "realtwo", "Nobody1", "Nobody2"));
+        for (int i = 0; i < 12; i++) names.add("filler" + i);
+        OfficialProfileResolver.BulkResult res = r.bulkExisting(names); // 16 names: the resolver sends at most 10
+        assertTrue(res.ok(), res.error());
+        assertEquals(2, res.found().size());
+        assertEquals(1, mojang.bulkRequests.get());
+        mojang.down = true;
+        OfficialProfileResolver.BulkResult down = r.bulkExisting(List.of("RealOne"));
+        assertFalse(down.ok(), "an outage is an error, not an empty answer");
+        assertTrue(down.found().isEmpty());
+        assertTrue(r.bulkExisting(List.of("bad name!")).found().isEmpty());
+    }
 }

@@ -1,126 +1,141 @@
-# Nicks — nickname + live skin identity replacement (Fabric, Minecraft 1.21.11, Java 21)
+# Nicks — nickname + live skin/cape identity replacement (Fabric, Minecraft 1.21.11, Java 21)
 
 An admin runs `/nicks set Player123 ShadowWolf`. The tab list, nametag, chat, death messages, `/msg`, advancement and
-join/leave messages now say **ShadowWolf**, and the player's actual skin becomes ShadowWolf's official skin if that
-Minecraft account exists, otherwise a unique generated one. No death, respawn, reconnect or restart is needed. The real
-UUID, account, inventory, permissions, stats and player data are never touched.
+join/leave messages now say **ShadowWolf**, and the player's actual skin **and cape** become ShadowWolf's if that Minecraft
+account exists. No death, respawn, reconnect or restart is needed. The real UUID, account, inventory, permissions, stats and
+player data are never touched.
 
-![generated fictional skins](docs/generated-skins-sample.png)
+## What changed in this version (your requests)
+
+| Request | Now |
+|---|---|
+| No made-up skins | **Nothing is generated any more** (the procedural generator is deleted). A nickname that is not a real account borrows a **real, existing skin** from a real source (see "Skin sources"). |
+| `/nicks set` must let many players share a nickname | `/nicks set @a Steve` gives every target that nickname (and the same appearance). `nickname.allowDuplicateNicknames` is `true` by default. Commands never guess between players who share a nickname. |
+| Capes (spec Part 24) | Real accounts get skin **and** official cape from the same profile response, in a unified appearance record, with a separate cape cache and cape-aware commands. |
+| Your 1,000,000-name file | Bundled in the jar, restored to `config/nicks/nickname-pools/` when missing, cached once, reloadable, used by `/nicks random`. My own name generator is deleted. |
 
 ## Read this first: what is and is not verified
 
-I wrote this without access to the 1.21.11 jars, Yarn mappings or Gradle's network, so:
-
 | Part | Status |
 |---|---|
-| `dev.nicks.core` — identity manager, persistence, Mojang resolver, skin download/validation/legacy conversion, procedural skin generator, fictional-skin registry, nickname generator, skin pipeline | **Implemented and tested.** 55 unit tests, run 6 times in a row, all passing (JDK 21, against a minimal JUnit shim because Gradle/JUnit could not be downloaded; the tests are standard JUnit 5 and will run under `gradle test`). Generated skins were rendered and visually inspected. |
-| `dev.nicks` Minecraft layer — commands, service, networking, mixins, client registry | **Implemented, compiled only against hand-written API stubs.** That proves my classes agree with each other, **not** that the real 1.21.11 signatures match. Never run in a game. |
+| `dev.nicks.core`: identity manager, persistence, Mojang resolver (name, bulk, signed profile, skin, cape), skin/cape download + validation, borrowed-skin registry, name pool, texture ledger, change planner | **Implemented and tested.** 72 unit tests, run 5 times in a row, all passing (JDK 21, against a minimal JUnit stand-in because Gradle/JUnit could not be downloaded; they are standard JUnit 5 and will run under `gradle test`). The real 1,000,000-name file is loaded and checked line by line in a test. |
+| `dev.nicks` Minecraft layer: commands, service, networking, mixins, client registry | **Implemented, compiled only against hand-written API stubs.** That proves my classes agree with each other, **not** that the real 1.21.11 signatures match. Never run in a game. |
+| Live Mojang / SkinDB services | **Not reachable from where I worked.** Everything network-related is tested against scripted fakes that follow the documented API shapes. |
 | Multiplayer behaviour (two clients, tracking range, spectator, dimension change...) | **Not tested.** |
 
-Expect a few small compile errors on first build. They are confined to the spots below (each marked `VERIFY ON 1.21.11`
-in the source). Paste the compiler output back and they are quick fixes.
+Expect a few small compile errors on first build, confined to these spots (each marked `VERIFY ON 1.21.11` in the source):
 
 | File | Why it may need a touch |
 |---|---|
-| `compat/SkinCompat.java` | `SkinTextures` constructor changed in 1.21.2, 1.21.5 and 1.21.9 (history is in the comment) |
+| `compat/SkinCompat.java` | `SkinTextures` constructor/accessors changed in 1.21.2, 1.21.5, 1.21.9; `DefaultSkinHelper.getSkinTextures(UUID)` |
 | `compat/TextureCompat.java` | `NativeImageBackedTexture` constructor (looked up by signature, 3 variants tried) |
-| `compat/PermissionCompat.java` | command permission API was reworked around 1.21.9–1.21.11 (old form in the comment) |
+| `compat/PermissionCompat.java` | command permission API was reworked around 1.21.9–1.21.11 |
 | `compat/ProfileCompat.java` | `GameProfile` `name()/id()` vs `getName()/getId()` |
-| `mixin/PlayerEntityMixin` | target `PlayerEntity#getName` |
-| `mixin/ServerPlayerEntityMixin` | target `getPlayerListName` |
-| `mixin/PlayerManagerMixin` | target `getPlayer(String)` |
-| `mixin/client/PlayerListEntryMixin` | targets `getSkinTextures` / `getProfile` |
+| `mixin/PlayerEntityMixin`, `ServerPlayerEntityMixin`, `PlayerManagerMixin`, `client/PlayerListEntryMixin` | method names/descriptors of their targets |
 
-Mixins are `require = 1` on purpose, so a wrong target fails loudly at startup, never silently. The only optional one is
-`ClientCommandSourceMixin` (nickname tab-completion in the client).
+Mixins are `require = 1` on purpose: a wrong target fails loudly at startup, never silently.
 
-## How it works
+## Skin sources (no generated skins)
 
-| Feature | Mechanism |
-|---|---|
-| Chat, death/advancement/join/leave messages, `/msg`, team chat | One mixin on `PlayerEntity#getName`. All of these are built from `getDisplayName()`, which decorates `getName()` with team prefix/suffix/colour. Signed-chat data is untouched: only the display Text changes. |
-| Tab list | `ServerPlayerEntity#getPlayerListName` returns the team-decorated nickname; identity changes send vanilla `UPDATE_DISPLAY_NAME`. No fake entries, UUID/ping/game mode/listed flag untouched. |
-| Nametag | Same `getName` hook on the **client**, so the real vanilla nametag renderer shows it (no extra floating text entity). |
-| Skin | Client mixin on `PlayerListEntry#getSkinTextures`, read every frame by the renderer, tab list and chat heads, so a change shows on the next frame. Texture is registered dynamically; capes are dropped so a nicknamed identity doesn't leak the real player's cape. |
-| Commands | `PlayerManager#getPlayer(String)` falls back to the nickname registry, so `/tp ShadowWolf`, `/gamemode creative ShadowWolf`, `/give`, `/effect`, `/kill`, `/clear`, `/team join` ... work. Ambiguous nicknames never resolve. |
-| Sync | S2C payloads `nicks:identity_sync` and `nicks:skin_texture`. Server-authoritative, revisioned, texture sent before the identity that uses it, **no C2S payload exists**, so clients cannot change anyone's identity. |
-| Async | Mojang lookups, texture downloads, skin generation and file IO run off the tick. Each request carries a generation number: a newer command for the same player makes older results stale and they are discarded. Disconnected players are handled (identity saved, no packets). |
+For a nickname that is a real account the skin and cape are that account's own. For a nickname Mojang confirms does **not**
+exist, a real skin is borrowed from the first source in `skin.sources` that delivers:
 
-Official skins are downloaded **by the server** (HTTPS only, host allow-list `textures.minecraft.net`, size and dimension
-limits, 64x32 legacy skins converted exactly like vanilla) and sent to clients as a normalized PNG, so clients never
-contact arbitrary URLs.
+1. **`mojang-accounts`** (official API, primary). The mod asks Mojang which of 10 random names from the username pool exist
+   (`POST /minecraft/profile/lookup/bulk/byname`, 10 names per request, only existing accounts come back), then fetches each hit's
+   signed profile. Those real accounts become "donors" (skin + that same account's cape), kept in `skin_donors.json`, topped up in
+   the background (`skin.donorTarget`, default 300) so commands rarely wait. How many pool names are real accounts, I could not
+   measure from here; if the hit rate is low the donor stock simply grows more slowly.
+2. **`skindb`** (optional extra). A public skin database (api.skindb.net, `GET /skin/random?count=10`) whose entries carry a
+   Mojang-hosted texture URL; only that URL is used and it must be on `textures.minecraft.net`. **Its documentation dates from 2019 and I
+   could not confirm the service is still online**; if it is down the mod logs once at debug level and moves on (retry after 5 minutes).
+3. **`assets`**: your own skin PNGs in `config/nicks/skin_assets/` (`name.png` classic, `name.slim.png` slim).
 
-## Install
-Server **and** every client need the mod (Fabric API required). Clients without it still see all name changes
-(tab list, chat, messages) but not the custom skin or nametag; the admin sees how many clients were synced.
+Rules: a nickname keeps its borrowed skin forever and every player using that nickname shares it; different nicknames get different
+donors unless `skin.allowDuplicateBorrowedSkins`; if no real source can be reached the command fails, the previous identity stays and the
+admin is told. I deliberately did not scrape NameMC or The Skindex (no public API, scraping is against their rules).
 
-## Build
-1. Copy `minecraft_version / yarn_mappings / loader_version / loom_version / fabric_version` from the `gradle.properties` of a
-   1.21.11 project that already builds for you (mine are guesses).
-2. Use the same Gradle version as that project. The workflow in `.github/workflows/build.yml` is set to `9.8.0` (what your
-   Loom 1.19 needed) and builds with `gradle build --no-daemon`, like your other mods. No wrapper is included.
+## Capes (spec Part 24)
+
+* The signed `textures` property is fetched with `unsigned=false`; `SKIN` and `CAPE` are read from the same response. No `CAPE` entry =
+  no cape: nothing is invented and the target's own cape is **not** kept (the client drops it while an identity is active).
+* The cape PNG is validated (64x32, HD multiples, legacy 22x17/46x22) and never altered, so design, colours and transparency are exact.
+  It is rendered through the normal player cape pipeline (and used for the elytra, as vanilla does).
+* Skin and cape are one record (`Appearance`: source UUID, source name, skin, model, cape, cape availability, signature, update time).
+  If the cape cannot be fetched the **whole change fails** and the old appearance stays (an outage is never read as "no cape").
+* Separate caches: `skin_cache/` and `cape_cache/` (content-addressed, bounded, pruned). Clients register each texture once and free it
+  when no identity uses it; the server tracks what each client holds, so A -> B -> A switches resend correctly (unit-tested).
+* `nicknoskin` keeps skin and cape, `reset` restores the original skin and cape, `lock` protects both, `refresh` re-fetches both.
+
+Cape scenarios from the spec: 1–9 are covered by automated tests (real account with/without cape, slim model, caped -> caped, caped -> uncaped,
+fictional identity, `skin set`, lock, restart); **10 (two clients viewing the same caped player) needs a real game**.
+
+## The one-million username pool
+
+`nicks_1_million_usernames.txt` is bundled byte-for-byte (verified: exactly 1,000,000 lines, no duplicates even case-insensitively, all
+3–16 characters of `A-Za-z0-9_`, no empty lines). Loaded once into a compact cache (measured: about 1 s and about 18 MB of heap, instead of a million String objects), original order preserved, never re-read per command.
+
+* Location `config/nicks/nickname-pools/nicks_1_million_usernames.txt`; a missing default file is restored from the jar.
+* `/nicks reload` re-reads it. A corrupted file (empty, or mostly invalid lines) is **rejected**, the previous pool stays active and the problem is reported.
+  Only if there never was a valid pool is the full bundled copy used (loudly). There is no tiny built-in list.
+* `/nicks random` picks random entries, never one that is online/in use, never a recently used one (`nickname.recentRandomMemory`), then checks it with Mojang:
+  real account -> its skin and cape, otherwise a borrowed real skin. The names are candidates, not proof of availability.
+* A small offensive-fragment filter (`nickname.bannedFragments`) skips about 375 of the million entries, some only because of innocent substrings (for example "vete**rape**arl").
+
+## Install / build
+Server **and** every client need the mod (Fabric API required). Clients without it still see all name changes but not custom skins, capes or nametags.
+
+1. Copy `minecraft_version / yarn_mappings / loader_version / loom_version / fabric_version` from the `gradle.properties` of a 1.21.11 project that already builds for you (mine are guesses).
+2. Use the same Gradle version as that project (`.github/workflows/build.yml` uses 9.8.0 like your other Loom 1.19 builds, `gradle build --no-daemon`, no wrapper).
 3. Jar: `build/libs/nicks-1.0.0.jar`.
 
-## Commands (admin; gamemaster level)
-Targets accept `@a @p @s @r`, player names and nicknames.
-
+## Commands (admin; gamemaster level). Targets: `@a @p @s @r`, player names, nicknames.
 ```
-/nicks random <targets>                  unique readable random names (dirtboi7, toast3r, p1xelcat ...)
-/nicks set <targets> <nickname>          nickname + matching skin (real account => official, else fictional)
-/nicks skin set <targets> [source]       skin of a real account; no source = skin for the current name
-/nicks nicknoskin set <targets> <nick>   nickname only, skin untouched, no lookups
-/nicks reset <targets>                   original name and skin back (history kept)
+/nicks random <targets>                  distinct random names from the pool, skin + cape from the real account or a borrowed real skin
+/nicks set <targets> <nickname>          every target gets this nickname (and the same appearance)
+/nicks skin set <targets> [source]       skin AND cape of a real account; no source = appearance for the current name
+/nicks nicknoskin set <targets> <nick>   nickname only; skin AND cape untouched, no lookups
+/nicks reset <targets>                   original name, skin and cape back (history kept)
 /nicks info <targets>   /nicks history <targets>
-/nicks skin refresh <targets>            re-fetch official skin / re-sync
-/nicks skin reroll <targets> [force]     new fictional skin, same nickname
-/nicks skin lock|unlock <targets>        locked: nickname commands never change the skin
-/nicks reload                            config, nickname pools, skin assets (keeps old settings if the file is invalid)
+/nicks skin refresh <targets>            re-fetch skin and cape / re-sync
+/nicks skin reroll <targets> [force]     different borrowed real skin for this nickname
+/nicks skin lock|unlock <targets>        locked: nickname commands never change skin or cape
+/nicks reload                            config, skin assets and the username pool (invalid files keep the old state)
 ```
-A Mojang outage never makes a real account fictional: the result is `UNRESOLVED`, the previous identity is kept and the
-admin is told.
 
-## Variety: practically unlimited skins and names
-Literal infinity is impossible (Minecraft names are capped at 16 characters, skins at 64x64 pixels), but neither supply runs out:
-
-* **Skins:** every 64-bit seed is a different character: 8 outfits, 7 hair styles, 5 accessories, face variants, procedurally
-  drawn emblems/numbers, and **continuous** colours (hue/saturation/brightness come from the seed, no fixed palette).
-  Tests assign 2,500 skins with no repeated texture or look, and 6,000 specs give ~6,000 distinct looks. When the optional
-  PNG library (`config/nicks/skin_assets/`, `name.png` / `name.slim.png`) is used up, generation continues.
-* **Names:** word pools + leetspeak first, then an endless pronounceable-word generator with digits. Tests produce 30,000
-  unique valid names; tiny custom pools still work. Replace/extend pools in `config/nicks/nickname_pools/`
-  (`prefixes.txt`, `suffixes.txt`, any other `*.txt` = ready-made names). Offensive fragments are filtered.
+## How it works
+| Feature | Mechanism |
+|---|---|
+| Chat, death/advancement/join/leave messages, `/msg` | One mixin on `PlayerEntity#getName` (all are built from `getDisplayName()`); signed-chat data is untouched |
+| Tab list | `ServerPlayerEntity#getPlayerListName` + vanilla `UPDATE_DISPLAY_NAME`; no fake entries |
+| Nametag | The same `getName` hook on the client, so the real nametag renderer shows it |
+| Skin + cape | Client mixin on `PlayerListEntry#getSkinTextures`, read every frame: changes appear on the next frame |
+| Commands | `PlayerManager#getPlayer(String)` falls back to the nickname registry; ambiguous nicknames never resolve |
+| Sync | S2C `nicks:identity_sync` and `nicks:skin_texture`; server-authoritative, revisioned, no C2S payload |
+| Async | Lookups, downloads and file IO run off the tick; newer commands make older results stale |
 
 ## Files
-`config/nicks/config.json` (rewritten with all options on load), `nickname_pools/`, `skin_assets/`.
-Per world, in `<world>/nicks/`: `identities.json` (schema-versioned, atomic writes, `.bak`, corrupt files quarantined,
-newer schemas loaded read-only and never overwritten), `fictional_skins.json`, `skin_cache/`. Nickname history is stored
-inside `identities.json`. No credentials or tokens are ever read or stored.
+`config/nicks/config.json` (rewritten with all options on load), `nickname-pools/`, `skin_assets/`. Per world in `<world>/nicks/`:
+`identities.json`, `borrowed_skins.json`, `skin_donors.json`, `skin_cache/`, `cape_cache/` (atomic writes, `.bak`, corrupt files quarantined, newer schemas read-only).
 
 ## Public API (`dev.nicks.api`)
-`NicksApi`: `getIdentity / getOriginalUsername / getNickname / getDisplayName / getSkinSource / getIdentityType`,
-`setNickname / setSkin / resetIdentity` (same validation, locks and sync as the commands; futures complete on the server
-thread), `registerSkinProvider(prefix, provider)`. `NicksEvents`: before/after nickname change, skin change, identity reset
-(before-events can veto).
+`NicksApi`: read identity/nickname/display name/source/type; `setNickname / setSkin / resetIdentity` (same validation, locks and sync as the commands); `registerSkinProvider`. `NicksEvents`: before/after nickname change, skin change, identity reset (before-events can veto).
 
 ## Known limitations
-* Vanilla clients cannot see custom skins or the replaced nametag (the server cannot make an unmodified client render a new
-  skin; names in tab list/chat/messages do work for them).
-* `@a[name=Player123]` now matches the nickname (selectors use the displayed name); the real name still works as a literal player name.
-* The server console log shows nicknames in some lines (`X lost connection`).
-* Third-party commands with their own player argument type are not covered unless they go through `PlayerManager#getPlayer(String)`.
-* Team colour changes made *after* a nickname was applied update the tab-list entry on the next identity change/join.
+* Vanilla clients cannot see custom skins, capes or the replaced nametag.
+* `@a[name=Player123]` now matches the nickname; the real name still works as a literal player name. With shared nicknames, `/tp Steve` resolves to the real player named Steve if one is online, otherwise it is ambiguous and not resolved.
+* The server log shows nicknames in some lines (`X lost connection`).
+* Third-party commands with their own player argument type are not covered unless they use `PlayerManager#getPlayer(String)`.
+* A borrowed skin is the public skin of a real player, shown under a different name (that is what "borrowed from a real source" means).
 
 ## Not implemented
-* Scoreboard display replacement (scores are keyed by the real name; overriding per-score display text would fight datapacks).
-* Nickname-based tab sorting (the client sorts by profile name).
-* Boss bars (vanilla boss bars do not show player names).
+* Scoreboard display replacement, nickname-based tab sorting, boss bars (no player names there).
 * Offline-mode servers and proxies were not tested.
 
 ## In-game test plan (not run yet)
-1. Two clients A, B. As op: `/nicks set A Notch` → both see Notch's skin (classic) and name in tab/nametag/chat; `/nicks set A Dream` or any real slim account → slim arms.
-2. `/nicks set A ToastBuilder` → generated skin; `/nicks set B ShadowWolf99` → a different one; restart server → unchanged.
-3. `/nicks nicknoskin set A Foo` keeps the skin; `/nicks skin set A Notch` keeps the name; switch A → B → A skins repeatedly.
-4. `/tp Foo B`, `/gamemode creative Foo`, `/give Foo diamond`; die by a mob and by B; `/msg Foo hi`; `/nicks reset A`.
-5. Join a third client late; leave and re-enter render distance; change dimension, game mode, spectate A.
-6. Cut the network (or block `api.minecraftservices.com`) and run `/nicks set A Notch` → red message, old identity intact.
-7. Check inventory, UUID (`/data get entity A UUID`), advancements and stats are unchanged.
+1. Two clients A, B. `/nicks set A Notch`: both see the skin and cape, name in tab/nametag/chat. A slim account: slim arms. An account without a cape: no cape (A's own cape disappears).
+2. `/nicks set @a Steve`: every target is Steve with the same look. `/nicks set A ToastBuilder`: a real borrowed skin; restart: unchanged.
+3. `/nicks nicknoskin set A Foo` keeps skin and cape; `/nicks skin set A Notch` keeps the name; switch A -> B -> A repeatedly; lock, then `/nicks set`.
+4. `/tp Foo B`, `/gamemode creative Foo`; deaths, `/msg`; `/nicks reset A` (original skin and cape return).
+5. Late joiner, tracking range, dimension change, spectating A; two clients watching the same caped player.
+6. Block `api.minecraftservices.com`: `/nicks set A Notch` fails in red and A is unchanged.
+7. Rename or corrupt the pool file, `/nicks reload`: error shown, old pool kept; delete it, restart: restored from the jar.

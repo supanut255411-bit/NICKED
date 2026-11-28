@@ -106,13 +106,14 @@ public final class PlayerIdentityManager implements AutoCloseable {
 
     /** Why this nickname cannot be used by {@code uuid}, or null when it is free. */
     public synchronized String nicknameConflict(UUID uuid, String nickname) {
+        // default: several players may share one nickname (/nicks set @a Steve). Only when duplicates are switched
+        // off in the config is a nickname refused if somebody else already uses it or it is another player's account name.
+        if (cfg.nickname.allowDuplicateNicknames) return null;
         String key = Nicknames.key(nickname);
         UUID owner = originalIndex.get(key);
         if (owner != null && !owner.equals(uuid)) return "Nickname matches another player's account name";
-        if (!cfg.nickname.allowDuplicateNicknames) {
-            Set<UUID> s = nicknameIndex.get(key);
-            if (s != null) for (UUID u : s) if (!u.equals(uuid)) return "Nickname is already assigned to another player";
-        }
+        Set<UUID> s = nicknameIndex.get(key);
+        if (s != null) for (UUID u : s) if (!u.equals(uuid)) return "Nickname is already assigned to another player";
         return null;
     }
 

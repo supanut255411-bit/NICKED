@@ -53,4 +53,33 @@ class SkinImagesTest {
         byte[] cut = java.util.Arrays.copyOf(truncated, truncated.length / 2);
         assertThrows(SkinException.class, () -> SkinImages.decode(cut, 1_000_000));
     }
+
+    private static byte[] capePng(int w, int h) {
+        BufferedImage i = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) i.setRGB(x, y, x < 3 ? 0x00000000 : 0xFF000000 | (x * 3) << 16 | (y * 5) << 8 | 0x44);
+        return SkinImages.encodePng(i);
+    }
+
+    @Test void officialCapeSizesAreAcceptedAndPixelsIncludingTransparencyAreKept() throws Exception {
+        for (int[] d : new int[][] {{64, 32}, {128, 64}, {256, 128}, {22, 17}, {46, 22}}) {
+            byte[] png = capePng(d[0], d[1]);
+            BufferedImage img = SkinImages.decodeCape(png, 1_000_000);
+            assertEquals(d[0], img.getWidth());
+            assertEquals(d[1], img.getHeight());
+            assertEquals(0, (img.getRGB(0, 0) >>> 24) & 255, "transparency preserved");
+            BufferedImage original = javax.imageio.ImageIO.read(new java.io.ByteArrayInputStream(png));
+            for (int y = 0; y < d[1]; y++) for (int x = 0; x < d[0]; x++) assertEquals(original.getRGB(x, y), img.getRGB(x, y));
+        }
+        assertEquals(SkinImages.fromCapePng(capePng(64, 32), 1_000_000).hash(), SkinImages.fromCapePng(capePng(64, 32), 1_000_000).hash());
+    }
+
+    @Test void badCapesAreRejected() {
+        assertThrows(SkinException.class, () -> SkinImages.decodeCape(capePng(100, 100), 1_000_000));
+        assertThrows(SkinException.class, () -> SkinImages.decodeCape(capePng(64, 64), 1_000_000));
+        assertThrows(SkinException.class, () -> SkinImages.decodeCape("nope".getBytes(), 1_000_000));
+        assertThrows(SkinException.class, () -> SkinImages.decodeCape(capePng(64, 32), 10));
+        byte[] png = capePng(64, 32);
+        byte[] cut = java.util.Arrays.copyOf(png, png.length / 2);
+        assertThrows(SkinException.class, () -> SkinImages.decodeCape(cut, 1_000_000));
+    }
 }

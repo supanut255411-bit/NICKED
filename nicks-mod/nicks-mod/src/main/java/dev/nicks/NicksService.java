@@ -13,8 +13,9 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * Orchestrates every identity change. Server-thread steps (validation, events, applying, packets) are separated from
- * worker-thread steps (Mojang lookups, texture download, skin generation, file IO) so the tick never blocks. Each
- * request carries a generation number: if the same player gets a newer command first, the older result is dropped.
+ * worker-thread steps (Mojang lookups, texture downloads, file IO) so the tick never blocks. Each request carries a
+ * generation number: if the same player gets a newer command first, the older result is dropped. Skin and cape always
+ * change together, from one source; a failure anywhere keeps the previous identity.
  */
 public final class NicksService {
     public interface Reporter {
@@ -25,8 +26,6 @@ public final class NicksService {
         default void complete(boolean success) { }
     }
 
-    public enum SkinMode { KEEP, FROM_NICKNAME, FROM_SOURCE, REFRESH, REROLL }
-
     private final NicksCore core;
 
     NicksService(NicksCore core) { this.core = core; }
@@ -35,18 +34,20 @@ public final class NicksService {
 
     // ---- commands ---------------------------------------------------------
 
+    /** All targets get the same nickname (and therefore the same appearance): /nicks set @a Steve. */
     public void set(Reporter rep, Collection<ServerPlayerEntity> targets, String nickname, boolean keepSkin) {
         for (ServerPlayerEntity p : targets) submit(rep, p, nickname, keepSkin ? SkinMode.KEEP : SkinMode.FROM_NICKNAME, null, false);
     }
 
     public void random(Reporter rep, Collection<ServerPlayerEntity> targets) {
         if (!core.config.nickname.enableRandom) { rep.fail("Random nicknames are disabled in the config"); return; }
+        if (!core.pool.loaded()) { rep.fail("The username pool is not loaded: check the server log and /nicks reload"); return; }
         Set<String> used = new HashSet<>(core.manager.activeNicknameKeys());
-        for (PlayerIdentity id : core.manager.all()) used.add(Nicknames.key(id.originalUsername()));
+        for (ServerPlayerEntity online : core.server.getPlayerManager().getPlayerList()) used.add(Nicknames.key(ProfileCompat.name(online.getGameProfile())));
         for (ServerPlayerEntity p : targets) {
-            Optional<String> n = core.names.next(x -> used.contains(Nicknames.key(x)) || core.manager.nicknameConflict(p.getUuid(), x) != null);
-            if (n.isEmpty()) { rep.fail("Could not find an unused random nickname for " + p.getNameForScoreboard()); continue; }
-            used.add(Nicknames.key(n.get())); // two players in one command never share a name
+            Optional<String> n = core.pool.pick(x -> used.contains(Nicknames.key(x)));
+            if (n.isEmpty()) { rep.fail("Could not find an unused nickname in the pool for " + p.getNameForScoreboard()); continue; }
+            used.add(Nicknames.key(n.get())); // two players in one command never get the same random name
             submit(rep, p, n.get(), SkinMode.FROM_NICKNAME, null, false);
         }
     }
@@ -84,8 +85,10 @@ public final class NicksService {
             rep.info("Current nickname: " + (id.active() && id.nickname() != null ? id.nickname() : "(none)"));
             rep.info("UUID: " + id.playerUuid() + " (unchanged)");
             rep.info("Identity type: " + id.identityType() + (id.active() ? "" : " (no identity applied)"));
-            rep.info("Skin source: " + id.skinSource() + ", model " + id.skinModel() + (id.hasSkinOverride() ? "" : ", no skin override"));
-            rep.info("Skin locked: " + (id.skinLocked() ? "yes" : "no"));
+            rep.info("Appearance source: " + (id.sourceName().isEmpty() ? "(none)" : id.sourceName()) + " [" + id.skinSource() + "]");
+            rep.info("Skin: " + (id.defaultSkin() ? "default skin of the source account" : id.skinHash().isEmpty() ? "none (original)" : "custom") + ", model " + id.skinModel());
+            rep.info("Cape: " + (id.capeHash().isEmpty() ? (id.hasAppearance() ? "none (the source has no cape)" : "original") : "source cape"));
+            rep.info("Skin and cape locked: " + (id.skinLocked() ? "yes" : "no"));
             rep.info("Synchronized: revision " + id.revision() + ", " + modded + "/" + online + " connected clients have the mod");
         }
     }
@@ -100,12 +103,15 @@ public final class NicksService {
     public void reload(Reporter rep) {
         try {
             core.config.reload(core.configDir.resolve("config.json"));
-            core.names.loadPools(core.configDir.resolve("nickname_pools"));
-            core.fictional.reloadAssets();
-            rep.ok(t("reload.success"));
         } catch (Exception e) {
             rep.fail("Reload failed, keeping the previous settings: " + e.getMessage());
+            return;
         }
+        core.borrowed.reloadAssets();
+        NamePool.LoadResult pool = core.loadPool();
+        rep.ok(t("reload.success"));
+        if (pool.accepted()) rep.ok(t("pool.reloaded", pool.names()));
+        else rep.fail(t("pool.problem", pool.message()) + (core.pool.loaded() ? " (still using the previous pool: " + core.pool.size() + " names)" : ""));
     }
 
     // ---- API entry points (server thread hop + future) -------------------
@@ -156,23 +162,13 @@ public final class NicksService {
         if (newNick != null) {
             Optional<String> bad = Nicknames.validate(newNick, core.config);
             if (bad.isPresent()) { rep.fail(bad.get()); rep.complete(false); return; }
-            String conflict = core.manager.nicknameConflict(uuid, newNick);
+            String conflict = core.manager.nicknameConflict(uuid, newNick); // null unless duplicates are switched off
             if (conflict != null) { rep.fail(conflict); rep.complete(false); return; }
         }
-        SkinMode eff = mode;
-        boolean locked = cur.skinLocked() && core.config.skin.enableSkinLocking;
-        if (locked && mode == SkinMode.FROM_NICKNAME) {
-            eff = SkinMode.KEEP;
-            rep.warn("Skin is locked: only the nickname changes");
-        } else if (locked && (mode == SkinMode.FROM_SOURCE || mode == SkinMode.REROLL) && !force) {
-            rep.fail(t("fail.locked")); rep.complete(false); return;
-        }
-        if (mode == SkinMode.REFRESH && !cur.hasSkinOverride()) {
-            rep.warn("This player has no custom skin to refresh"); rep.complete(false); return;
-        }
-        if (mode == SkinMode.REROLL && cur.identityType() != IdentityType.FICTIONAL && !force) {
-            rep.fail(t("fail.fictional.only")); rep.complete(false); return;
-        }
+        ChangePlanner.Plan plan = ChangePlanner.plan(cur, mode, force, core.config.skin.enableSkinLocking);
+        if (!plan.ok()) { rep.fail(t(plan.error())); rep.complete(false); return; }
+        if (plan.warning() != null) rep.warn(t(plan.warning()));
+        final SkinMode eff = plan.mode();
         String oldNick = cur.active() ? cur.nickname() : null;
         if (newNick != null && !NicksEvents.BEFORE_NICKNAME_CHANGE.invoker().allow(uuid, oldNick, newNick)) {
             rep.fail(t("fail.cancelled")); rep.complete(false); return;
@@ -184,25 +180,24 @@ public final class NicksService {
 
         final long gen = core.manager.nextGeneration(uuid); // older in-flight requests for this player are now stale
         final String resolveName = newNick != null ? newNick : (cur.active() && cur.nickname() != null ? cur.nickname() : cur.originalUsername());
-        final SkinMode mm = eff;
         final String before = cur.effectiveName();
-        CompletableFuture.supplyAsync(() -> compute(uuid, resolveName, mm, source, cur), core.io)
-                .whenComplete((outcome, err) -> core.server.execute(() -> finish(rep, uuid, gen, newNick, mm, before, cur, outcome, err)));
+        CompletableFuture.supplyAsync(() -> compute(uuid, resolveName, eff, source, cur), core.io)
+                .whenComplete((outcome, err) -> core.server.execute(() -> finish(rep, uuid, gen, newNick, eff, before, cur, outcome, err)));
     }
 
-    /** Worker thread. Returns null for "keep the current skin". */
+    /** Worker thread. Returns null for "keep the current skin and cape". */
     private SkinPipeline.Outcome compute(UUID uuid, String name, SkinMode mode, String source, PlayerIdentity cur) {
         try {
             return switch (mode) {
                 case KEEP -> null;
                 case FROM_NICKNAME -> core.pipeline.forNickname(uuid, name, false);
                 case FROM_SOURCE -> fromSource(source);
-                case REROLL -> core.pipeline.fictional(uuid, name, true);
+                case REROLL -> core.pipeline.borrowed(name, true);
                 case REFRESH -> {
                     if (cur.identityType() == IdentityType.REAL_ACCOUNT && cur.skinSource().startsWith("official:")) {
-                        yield core.pipeline.forSkinSource(cur.skinSource().substring("official:".length()), true);
+                        yield core.pipeline.forSkinSource(cur.skinSource().substring("official:".length()), true); // skin AND cape again
                     }
-                    yield cur.identityType() == IdentityType.FICTIONAL ? core.pipeline.fictional(uuid, name, false) : null;
+                    yield cur.identityType() == IdentityType.FICTIONAL ? core.pipeline.borrowed(name, false) : null;
                 }
             };
         } catch (RuntimeException e) {
@@ -218,9 +213,11 @@ public final class NicksService {
                 try {
                     Optional<NicksApi.ProvidedSkin> ps = p.resolve(source.substring(colon + 1));
                     if (ps.isEmpty()) return new SkinPipeline.Failed("Skin provider has no skin '" + source + "'", false);
-                    SkinData d = SkinImages.fromPng(ps.get().png(), ps.get().slim() ? SkinModel.SLIM : SkinModel.CLASSIC, core.config.skin.maxSkinBytes);
-                    core.cache.put(d);
-                    return new SkinPipeline.Resolved(IdentityType.FICTIONAL, "provider:" + source, d, null, source, "");
+                    SkinModel model = ps.get().slim() ? SkinModel.SLIM : SkinModel.CLASSIC;
+                    SkinData d = SkinImages.fromPng(ps.get().png(), model, core.config.skin.maxSkinBytes);
+                    core.skinCache.put(d);
+                    Appearance a = new Appearance(null, source, "provider", d, model, null, false, "", System.currentTimeMillis());
+                    return new SkinPipeline.Resolved(IdentityType.FICTIONAL, "provider:" + source, a, source);
                 } catch (SkinException | RuntimeException e) {
                     return new SkinPipeline.Failed("Skin provider failed: " + e.getMessage(), false);
                 }
@@ -242,36 +239,37 @@ public final class NicksService {
             rep.fail(f.reason()); rep.warn(t("fail.previous")); rep.complete(false);
             return;
         }
-        SkinPipeline.Resolved r = (SkinPipeline.Resolved) outcome; // null when the skin is kept
+        SkinPipeline.Resolved r = (SkinPipeline.Resolved) outcome; // null when skin and cape are kept
         PlayerIdentityManager.UpdateResult res = core.manager.apply(uuid, gen, newNick, b -> {
             if (newNick != null) b.nickname = newNick;
             if (newNick != null || r != null) b.active = true;
-            if (r != null) {
-                b.identityType = r.type();
-                b.skinSource = r.skinSource();
-                b.skinModel = r.skin().model();
-                b.skinHash = r.skin().hash();
-                b.fictionalSkinId = r.fictionalId();
-                b.officialProfileUuid = r.officialUuid();
-            }
+            if (r != null) b.setAppearance(r.type(), r.skinSource(), r.appearance()); // skin AND cape, from one source
         });
         switch (res.status()) {
             case STALE -> { rep.warn(t("fail.stale")); rep.complete(false); return; }
-            case CONFLICT -> { rep.fail(res.detail()); rep.complete(false); return; }
-            case UNKNOWN_PLAYER -> { rep.fail(res.detail()); rep.complete(false); return; }
+            case CONFLICT, UNKNOWN_PLAYER -> { rep.fail(res.detail()); rep.complete(false); return; }
             default -> { }
         }
         PlayerIdentity neu = res.identity();
         if (mode == SkinMode.REFRESH && r != null) {
-            core.network.invalidate(cur.skinHash());
-            core.network.invalidate(neu.skinHash());
+            core.network.invalidate(cur.skinHash(), cur.capeHash());
+            core.network.invalidate(neu.skinHash(), neu.capeHash());
         }
         if (newNick != null) rep.ok(t("set.success", beforeName, newNick));
         if (r != null) {
+            Appearance a = r.appearance();
             switch (r.type()) {
-                case REAL_ACCOUNT -> { rep.ok(t("account.real", r.canonicalName())); rep.ok(t("skin.official")); }
-                case FICTIONAL -> rep.ok(r.skinSource().startsWith("provider:") ? t("skin.provider")
-                        : mode == SkinMode.FROM_SOURCE || mode == SkinMode.REROLL ? t("skin.fictional") : t("account.fictional"));
+                case REAL_ACCOUNT -> {
+                    rep.ok(t("account.real", r.canonicalName()));
+                    rep.ok(t(a.usesDefaultSkin() ? "skin.default" : "skin.official"));
+                    rep.ok(t(a.capeAvailable() ? "cape.official" : "cape.none"));
+                }
+                case FICTIONAL -> {
+                    if (r.skinSource().startsWith("provider:")) rep.ok(t("skin.provider"));
+                    else if (mode == SkinMode.FROM_NICKNAME) rep.ok(t("account.fictional", r.canonicalName(), a.sourceName()));
+                    else rep.ok(t("skin.borrowed", a.sourceName()));
+                    if (a.capeAvailable()) rep.ok(t("cape.borrowed"));
+                }
                 default -> { }
             }
         } else if (mode == SkinMode.KEEP) {
@@ -301,7 +299,7 @@ public final class NicksService {
         core.server.getPlayerManager().sendToAll(new PlayerListS2CPacket(PlayerListS2CPacket.Action.UPDATE_DISPLAY_NAME, online));
         int synced = core.network.broadcast(id);
         int total = core.server.getPlayerManager().getPlayerList().size();
-        if (id.active() && id.hasSkinOverride()) {
+        if (id.hasAppearance()) {
             rep.ok(t("sync", synced));
             if (total > synced) rep.warn(t("sync.vanilla", total - synced));
         } else if (total > synced) {

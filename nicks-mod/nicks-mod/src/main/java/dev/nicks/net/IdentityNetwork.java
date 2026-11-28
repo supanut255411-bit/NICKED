@@ -4,26 +4,22 @@ import dev.nicks.NicksCore;
 import dev.nicks.core.NicksLog;
 import dev.nicks.core.PlayerIdentity;
 import dev.nicks.core.SkinData;
+import dev.nicks.core.SkinPipeline;
+import dev.nicks.core.TextureLedger;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.network.ServerPlayerEntity;
 
-import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Server-authoritative identity synchronisation. Clients without the mod are simply skipped (they still get every
- * name change through vanilla packets, but not custom skins or nametags).
+ * Server-authoritative identity synchronisation (skin + cape together). Clients without the mod are skipped: they still
+ * get every name change through vanilla packets, but not custom skins, capes or nametags.
  */
 public final class IdentityNetwork {
     private final NicksCore core;
-    /**
-     * viewer -> (player -> skin hash that client currently holds for that player). Mirrors the client's own bookkeeping:
-     * a client frees a texture as soon as no identity references it, so a texture is (re)sent whenever the hash is not
-     * currently referenced by any identity on that client. (A plain "already sent" set would break A -> B -> A switches.)
-     */
-    private final Map<UUID, Map<UUID, String>> held = new ConcurrentHashMap<>();
+    /** What each modded client currently holds; decides when a texture PNG must be (re)sent. */
+    private final TextureLedger ledger = new TextureLedger();
 
     public IdentityNetwork(NicksCore core) { this.core = core; }
 
@@ -47,13 +43,13 @@ public final class IdentityNetwork {
     }
 
     public void onDisconnect(UUID uuid) {
-        held.remove(uuid);            // this client is gone
+        ledger.forgetViewer(uuid);
+        ledger.forgetPlayer(uuid);
         core.formatter.forget(uuid);
-        // tell the remaining clients to drop the departed player's identity and free its texture (revision -1 = forget)
-        IdentitySyncPayload forget = new IdentitySyncPayload(uuid, true, "", (byte) 0, "original", "", (byte) 0, -1L, false);
+        // tell the remaining clients to drop the departed player's identity and free its textures (revision -1 = forget)
+        IdentitySyncPayload forget = new IdentitySyncPayload(uuid, true, "", (byte) 0, "original", "", "",
+                IdentitySyncPayload.NONE, (byte) 0, -1L, false);
         for (ServerPlayerEntity viewer : core.server.getPlayerManager().getPlayerList()) {
-            Map<UUID, String> m = held.get(viewer.getUuid());
-            if (m != null) m.remove(uuid);
             if (viewer.getUuid().equals(uuid) || !ServerPlayNetworking.canSend(viewer, IdentitySyncPayload.ID)) continue;
             try {
                 ServerPlayNetworking.send(viewer, forget);
@@ -72,11 +68,8 @@ public final class IdentityNetwork {
         return n;
     }
 
-    /** Mark a texture as not delivered anywhere (used by /nicks skin refresh so the PNG is sent again). */
-    public void invalidate(String hash) {
-        if (hash == null || hash.isEmpty()) return;
-        for (Map<UUID, String> m : held.values()) m.values().removeIf(hash::equals);
-    }
+    /** Mark textures as not delivered anywhere (/nicks skin refresh), so the PNGs are sent again. */
+    public void invalidate(String skinHash, String capeHash) { ledger.invalidate(skinHash, capeHash); }
 
     public int moddedViewers() {
         int n = 0;
@@ -89,28 +82,45 @@ public final class IdentityNetwork {
     private boolean sendTo(ServerPlayerEntity viewer, PlayerIdentity id) {
         if (!ServerPlayNetworking.canSend(viewer, IdentitySyncPayload.ID)) return false;
         try {
-            Map<UUID, String> mine = held.computeIfAbsent(viewer.getUuid(), k -> new ConcurrentHashMap<>());
-            String hash = "";
-            if (id.hasSkinOverride()) {
-                SkinData skin = core.pipeline.skinFor(id);
-                if (skin == null) {
+            UUID vid = viewer.getUuid();
+            String skinHash = "", capeHash = "";
+            UUID defaultSource = IdentitySyncPayload.NONE;
+            if (id.hasAppearance()) {
+                SkinPipeline.Textures t = core.pipeline.textures(id);
+                if (id.defaultSkin()) {
+                    if (id.officialProfileUuid() != null) defaultSource = id.officialProfileUuid();
+                } else if (t.skin() == null) {
                     NicksLog.warn("Skin texture for " + id.playerUuid() + " is missing; run /nicks skin refresh. Sending name only.");
-                } else if (skin.png().length > Math.min(core.config.network.maxTexturePayloadBytes, SkinTexturePayload.MAX_BYTES)) {
-                    NicksLog.warn("Skin texture for " + id.playerUuid() + " exceeds the payload limit; not sent");
+                } else if (fits(t.skin())) {
+                    skinHash = t.skin().hash();
+                    if (ledger.skinNeeded(vid, skinHash)) ServerPlayNetworking.send(viewer, new SkinTexturePayload(SkinTexturePayload.KIND_SKIN, skinHash, t.skin().png()));
                 } else {
-                    hash = skin.hash();
-                    if (!mine.containsValue(hash)) ServerPlayNetworking.send(viewer, new SkinTexturePayload(hash, skin.png()));
+                    NicksLog.warn("Skin texture for " + id.playerUuid() + " exceeds the payload limit; not sent");
+                }
+                if (!id.capeHash().isEmpty()) {
+                    if (t.cape() == null) {
+                        NicksLog.warn("Cape texture for " + id.playerUuid() + " is missing; run /nicks skin refresh. No cape is shown.");
+                    } else if (fits(t.cape())) {
+                        capeHash = t.cape().hash();
+                        if (ledger.capeNeeded(vid, capeHash)) ServerPlayNetworking.send(viewer, new SkinTexturePayload(SkinTexturePayload.KIND_CAPE, capeHash, t.cape().png()));
+                    } else {
+                        NicksLog.warn("Cape texture for " + id.playerUuid() + " exceeds the payload limit; not sent");
+                    }
                 }
             }
             ServerPlayNetworking.send(viewer, new IdentitySyncPayload(id.playerUuid(), !id.active(),
-                    id.nickname() == null ? "" : id.nickname(), (byte) id.identityType().ordinal(), id.skinSource(), hash,
-                    (byte) id.skinModel().ordinal(), id.revision(), core.config.display.replaceNametags));
-            if (hash.isEmpty()) mine.remove(id.playerUuid());
-            else mine.put(id.playerUuid(), hash);
+                    id.nickname() == null ? "" : id.nickname(), (byte) id.identityType().ordinal(), id.skinSource(),
+                    skinHash, capeHash, defaultSource, (byte) id.skinModel().ordinal(), id.revision(),
+                    core.config.display.replaceNametags));
+            ledger.record(vid, id.playerUuid(), skinHash, capeHash);
             return true;
         } catch (RuntimeException e) {
             NicksLog.warn("Could not synchronize identity to " + viewer.getUuid(), e); // never silently ignored
             return false;
         }
+    }
+
+    private boolean fits(SkinData d) {
+        return d.png().length <= Math.min(core.config.network.maxTexturePayloadBytes, SkinTexturePayload.MAX_BYTES);
     }
 }

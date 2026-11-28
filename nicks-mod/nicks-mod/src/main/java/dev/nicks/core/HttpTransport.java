@@ -17,6 +17,11 @@ public interface HttpTransport {
 
     Response get(URI uri, Duration timeout, int maxBytes) throws IOException, InterruptedException;
 
+    default Response post(URI uri, byte[] body, String contentType, Duration timeout, int maxBytes)
+            throws IOException, InterruptedException {
+        throw new IOException("POST is not supported by this transport");
+    }
+
     /** JDK HttpClient implementation: no redirects, bounded body, short timeouts. Never called on the server tick. */
     final class Jdk implements HttpTransport {
         private final HttpClient client = HttpClient.newBuilder()
@@ -26,8 +31,19 @@ public interface HttpTransport {
 
         @Override
         public Response get(URI uri, Duration timeout, int maxBytes) throws IOException, InterruptedException {
-            HttpRequest req = HttpRequest.newBuilder(uri).timeout(timeout)
-                    .header("User-Agent", "NicksMod/1.0 (+Fabric)").header("Accept", "*/*").GET().build();
+            return send(HttpRequest.newBuilder(uri).timeout(timeout)
+                    .header("User-Agent", "NicksMod/1.0 (+Fabric)").header("Accept", "*/*").GET().build(), maxBytes);
+        }
+
+        @Override
+        public Response post(URI uri, byte[] body, String contentType, Duration timeout, int maxBytes)
+                throws IOException, InterruptedException {
+            return send(HttpRequest.newBuilder(uri).timeout(timeout).header("User-Agent", "NicksMod/1.0 (+Fabric)")
+                    .header("Content-Type", contentType).header("Accept", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(body)).build(), maxBytes);
+        }
+
+        private Response send(HttpRequest req, int maxBytes) throws IOException, InterruptedException {
             HttpResponse<InputStream> resp = client.send(req, HttpResponse.BodyHandlers.ofInputStream());
             try (InputStream in = resp.body()) {
                 byte[] body = in.readNBytes(maxBytes + 1);

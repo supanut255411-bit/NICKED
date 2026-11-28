@@ -37,6 +37,15 @@ public final class SkinTextureDownloader {
     }
 
     public SkinData download(String url, SkinModel model) throws SkinException {
+        return SkinImages.fromPng(fetch(url), model, maxBytes);
+    }
+
+    /** The official cape texture, validated but otherwise untouched. */
+    public SkinData downloadCape(String url) throws SkinException {
+        return SkinImages.fromCapePng(fetch(url), maxBytes);
+    }
+
+    private byte[] fetch(String url) throws SkinException {
         URI uri;
         try {
             // Mojang's texture property uses http://; the CDN serves https, which is what we require.
@@ -49,7 +58,7 @@ public final class SkinTextureDownloader {
         try {
             HttpTransport.Response r = http.get(uri, timeout, maxBytes);
             if (r.status() != 200) throw new SkinException("Texture server returned HTTP " + r.status());
-            return SkinImages.fromPng(r.body(), model, maxBytes);
+            return r.body();
         } catch (IOException e) {
             throw new SkinException("Texture download failed: " + e.getMessage());
         } catch (InterruptedException e) {
