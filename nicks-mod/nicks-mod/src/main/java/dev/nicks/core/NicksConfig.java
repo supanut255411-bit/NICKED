@@ -63,6 +63,16 @@ public final class NicksConfig {
         /** A borrowed real account's cape comes along with its skin (always from the same account). */
         public boolean donorCapes = true;
         public boolean allowDuplicateBorrowedSkins = false;
+
+        // ---- fictional skin settings (used by FictionalSkinRegistry) ----
+        /** Allow the same fictional skin to be handed out to more than one player. */
+        public boolean allowDuplicateFictionalSkins = false;
+        /** Try the PNG files in assetDirectory before generating procedural skins. */
+        public boolean preferAssetLibrary = true;
+        /** Generate procedural skins when no unused library skin is available. */
+        public boolean enableProceduralGeneration = true;
+        // -----------------------------------------------------------------
+
         public boolean backgroundDonorHarvest = true;
         public int donorTarget = 300;
         public int donorHarvestIntervalSeconds = 45;
