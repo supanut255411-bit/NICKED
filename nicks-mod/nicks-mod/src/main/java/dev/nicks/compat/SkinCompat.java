@@ -2,7 +2,7 @@ package dev.nicks.compat;
 
 import net.minecraft.client.util.DefaultSkinHelper;
 import net.minecraft.entity.player.PlayerModelType;
-import net.minecraft.entity.player.SkinTextures;
+import net.minecraft.entity.player.PlayerSkinType;
 import net.minecraft.util.AssetInfo;
 import net.minecraft.util.Identifier;
 
@@ -34,10 +34,11 @@ public final class SkinCompat {
             SkinTextures base = DefaultSkinHelper.getSkinTextures(defaultSource);
             if (cape == null) return base; // default skins carry no cape
             AssetInfo.TextureAsset capeAsset = new AssetInfo.TextureAssetInfo(cape, cape);
-            return new SkinTextures(base.texture(), capeAsset, capeAsset, base.model(), true);
+            return new SkinTextures(base.body(), capeAsset, capeAsset, base.model(), true);
         }
         AssetInfo.TextureAsset body = new AssetInfo.TextureAssetInfo(skin, skin);
         AssetInfo.TextureAsset capeAsset = cape == null ? null : new AssetInfo.TextureAssetInfo(cape, cape);
-        return new SkinTextures(body, capeAsset, capeAsset, slim ? PlayerModelType.SLIM : PlayerModelType.WIDE, true);
+        return new SkinTextures(body, capeAsset, capeAsset,
+        slim ? PlayerSkinType.SLIM : PlayerSkinType.WIDE, true);
     }
 }
